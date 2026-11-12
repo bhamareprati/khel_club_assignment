@@ -5,6 +5,7 @@ import csv
 import io
 from . import match_bp
 from sqlalchemy import cast
+from services.match_outcomes import result_label, uses_scores
 
 @match_bp.route('/get-match-fixtures', methods=['GET'])
 def get_match_fixtures():
@@ -128,7 +129,8 @@ def get_match_fixtures():
             # Get scores from lookup
             team1_score = score_lookup.get(match_id, {}).get(match.team1_id, 0)
             team2_score = score_lookup.get(match_id, {}).get(match.team2_id, 0)
-            match_result = f"{team1_score}-{team2_score}"
+            # "a-b" for scored matches, "Walkover" (etc.) for unscored outcomes
+            match_result = result_label(match.outcome_type, team1_score, team2_score)
 
             # Get players from lookup
             team1_players = []
@@ -169,7 +171,8 @@ def get_match_fixtures():
                 'match_status': {
                     'winner_team_id': match.winner_team_id,
                     'is_final': match.is_final,
-                    'status': match.status
+                    'status': match.status,
+                    'outcome_type': match.outcome_type
                 },
                 'bracket_info': {
                     'round_number': match.round_number,
@@ -271,7 +274,10 @@ def get_match_fixtures_csv():
             if match.is_final:
                 team1_score = Score.query.filter_by(match_id=match.id, team_id=match.team1_id).first()
                 team2_score = Score.query.filter_by(match_id=match.id, team_id=match.team2_id).first()
-                if team1_score and team2_score:
+                if not uses_scores(match.outcome_type):
+                    # Walkover etc.: label only (winner is in winner_team_id), never 0-0
+                    match_result = result_label(match.outcome_type, 0, 0)
+                elif team1_score and team2_score:
                     match_result = f"{team1_score.score}-{team2_score.score}"
 
             # Write match details to CSV

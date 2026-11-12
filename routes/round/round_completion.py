@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from models import Tournament, Team, Player, Match, Score, Round, db
 from routes.tournament.tournament_core import show_standings
+from services.match_outcomes import decided_result
 from . import round_bp
 
 def get_round_standings(tournament_id, round_id):
@@ -45,18 +46,28 @@ def get_round_standings(tournament_id, round_id):
                     }
 
                 team_stats = pool_standings[match.pool][score.team_id]
-                team_stats['points_scored'] += score.score
-                team_stats['matches_played'].add(match.id)
 
-                # Find opponent's score
-                opponent_score = next(
-                    (s for s in match_scores if s.team_id != score.team_id),
-                    None
-                )
-                if opponent_score:
-                    team_stats['points_lost'] += opponent_score.score
-                    if score.score > opponent_score.score:
-                        team_stats['matches_won'] += 1
+                decided = decided_result(match.outcome_type, match.team1_id, match.team2_id, match.winner_team_id)
+                if decided:
+                    # Walkover etc.: played + a win for the stored winner, no points.
+                    # Credited once per team per match even if score rows are duplicated.
+                    if match.id not in team_stats['matches_played']:
+                        team_stats['matches_played'].add(match.id)
+                        if score.team_id == decided.winner_team_id:
+                            team_stats['matches_won'] += 1
+                else:
+                    team_stats['points_scored'] += score.score
+                    team_stats['matches_played'].add(match.id)
+
+                    # Find opponent's score
+                    opponent_score = next(
+                        (s for s in match_scores if s.team_id != score.team_id),
+                        None
+                    )
+                    if opponent_score:
+                        team_stats['points_lost'] += opponent_score.score
+                        if score.score > opponent_score.score:
+                            team_stats['matches_won'] += 1
 
                 team_stats['total_scores'] = team_stats['matches_won']
                 team_stats['points_difference'] = (

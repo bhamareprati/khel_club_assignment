@@ -1,7 +1,20 @@
 from flask import request, jsonify, current_app, render_template
 from models import Tournament, Team, Player, Match, Score, Round, db, Season
 from sqlalchemy import text, or_, and_, func, case, distinct
+from services.match_outcomes import decided_result
 from . import tournament_bp
+
+
+def _credit_decided_match(stats_by_team, match, decided):
+    """Standings policy for a match decided WITHOUT scores (e.g. walkover):
+    it counts as a played match for both teams and one win for the winner
+    (the loser's loss follows from played - won). No points are scored or
+    conceded, so points_difference is untouched. `match` is a result row that
+    carries match_id/team1_id/team2_id; `decided` comes from decided_result()."""
+    stats_by_team[match.team1_id]['matches'].add(match.match_id)
+    stats_by_team[match.team2_id]['matches'].add(match.match_id)
+    stats_by_team[decided.winner_team_id]['matches_won'] += 1
+
 
 @tournament_bp.route('/tournaments', methods=['POST'])
 def create_tournament():
@@ -134,7 +147,9 @@ def show_standings(tournament_id):
             s1.team_id as team1_id,
             s1.score as team1_score,
             s2.team_id as team2_id,
-            s2.score as team2_score
+            s2.score as team2_score,
+            m.outcome_type as outcome_type,
+            m.winner_team_id as winner_team_id
         FROM `match` m
         JOIN score s1 ON s1.match_id = m.id AND s1.team_id = m.team1_id
         JOIN score s2 ON s2.match_id = m.id AND s2.team_id = m.team2_id
@@ -145,9 +160,9 @@ def show_standings(tournament_id):
         score_sql,
         {'tournament_id': tournament_id}
     ).fetchall()
-    
+
     print(f"Found {len(matches)} matches")
-    
+
     # Create a dictionary to store scores by team and round
     team_scores = {}
     
@@ -170,7 +185,14 @@ def show_standings(tournament_id):
         print(f"\nProcessing match {match.match_id}:")
         print(f"Team1 ({match.team1_id}): {match.team1_score}")
         print(f"Team2 ({match.team2_id}): {match.team2_score}")
-        
+
+        # Walkover etc.: the stored winner decides, never the (0-0) score rows
+        decided = decided_result(match.outcome_type, match.team1_id, match.team2_id, match.winner_team_id)
+        if decided:
+            _credit_decided_match(team_scores[round_id], match, decided)
+            print(f"Decided by {match.outcome_type}: Team {decided.winner_team_id}")
+            continue
+
         # Add scores
         team_scores[round_id][match.team1_id]['points_scored'] += match.team1_score
         team_scores[round_id][match.team1_id]['points_lost'] += match.team2_score
@@ -308,7 +330,9 @@ def show_overall_standings(tournament_id):
             s1.team_id as team1_id,
             s1.score as team1_score,
             s2.team_id as team2_id,
-            s2.score as team2_score
+            s2.score as team2_score,
+            m.outcome_type as outcome_type,
+            m.winner_team_id as winner_team_id
         FROM `match` m
         JOIN score s1 ON s1.match_id = m.id AND s1.team_id = m.team1_id
         JOIN score s2 ON s2.match_id = m.id AND s2.team_id = m.team2_id
@@ -319,9 +343,9 @@ def show_overall_standings(tournament_id):
         score_sql,
         {'tournament_id': tournament_id}
     ).fetchall()
-    
+
     print(f"Found {len(matches)} matches")
-    
+
     # Create a dictionary to store overall scores by team
     team_scores = {}
     
@@ -340,12 +364,19 @@ def show_overall_standings(tournament_id):
         print(f"\nProcessing match {match.match_id}:")
         print(f"Team1 ({match.team1_id}): {match.team1_score}")
         print(f"Team2 ({match.team2_id}): {match.team2_score}")
-        
+
+        # Walkover etc.: the stored winner decides, never the (0-0) score rows
+        decided = decided_result(match.outcome_type, match.team1_id, match.team2_id, match.winner_team_id)
+        if decided:
+            _credit_decided_match(team_scores, match, decided)
+            print(f"Decided by {match.outcome_type}: Team {decided.winner_team_id}")
+            continue
+
         # Skip unplayed matches
         if match.team1_score == 0 and match.team2_score == 0:
             print("Match not played yet")
             continue
-        
+
         # Add scores
         team_scores[match.team1_id]['points_scored'] += match.team1_score
         team_scores[match.team1_id]['points_lost'] += match.team2_score
@@ -507,7 +538,9 @@ def show_second_place_standings(tournament_id):
             s1.team_id as team1_id,
             s1.score as team1_score,
             s2.team_id as team2_id,
-            s2.score as team2_score
+            s2.score as team2_score,
+            m.outcome_type as outcome_type,
+            m.winner_team_id as winner_team_id
         FROM `match` m
         JOIN score s1 ON s1.match_id = m.id AND s1.team_id = m.team1_id
         JOIN score s2 ON s2.match_id = m.id AND s2.team_id = m.team2_id
@@ -545,7 +578,14 @@ def show_second_place_standings(tournament_id):
         print(f"\nProcessing match {match.match_id}:")
         print(f"Team1 ({match.team1_id}): {match.team1_score}")
         print(f"Team2 ({match.team2_id}): {match.team2_score}")
-        
+
+        # Walkover etc.: the stored winner decides, never the (0-0) score rows
+        decided = decided_result(match.outcome_type, match.team1_id, match.team2_id, match.winner_team_id)
+        if decided:
+            _credit_decided_match(pool_scores[pool], match, decided)
+            print(f"Decided by {match.outcome_type}: Team {decided.winner_team_id}")
+            continue
+
         # Add scores
         pool_scores[pool][match.team1_id]['points_scored'] += match.team1_score
         pool_scores[pool][match.team1_id]['points_lost'] += match.team2_score

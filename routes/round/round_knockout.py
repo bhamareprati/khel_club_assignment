@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from models import db, Tournament, Match, Team, Score, Round
 from sqlalchemy import func
+from services.match_outcomes import decided_result
 from . import round_bp
 from flask_cors import cross_origin
 import csv
@@ -53,7 +54,16 @@ def get_pool_standings(tournament_id, round_id):
         team1_score = next((s.score for s in scores if s.match_id == match.id and s.team_id == match.team1_id), 0)
         team2_score = next((s.score for s in scores if s.match_id == match.id and s.team_id == match.team2_id), 0)
         
-        if match.team1_id and match.team2_id:  # Only count completed matches
+        decided = decided_result(match.outcome_type, match.team1_id, match.team2_id, match.winner_team_id)
+        if decided and match.team1_id and match.team2_id:
+            # Walkover etc.: played + a win for the stored winner, no points
+            pool = match.pool.strip()
+            for team_id in (match.team1_id, match.team2_id):
+                if team_id in pool_standings.get(pool, {}):
+                    pool_standings[pool][team_id]['matches_played'] += 1
+                    if team_id == decided.winner_team_id:
+                        pool_standings[pool][team_id]['matches_won'] += 1
+        elif match.team1_id and match.team2_id:  # Only count completed matches
             pool = match.pool.strip()  # Clean pool name
             # Update team 1 stats
             if match.team1_id in pool_standings.get(pool, {}):

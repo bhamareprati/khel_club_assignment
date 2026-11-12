@@ -324,7 +324,8 @@ def get_pool_fixtures(pool_name):
                 },
                 'status': match.status,
                 'is_final': match.is_final,
-                'winner_team_id': match.winner_team_id
+                'winner_team_id': match.winner_team_id,
+                'outcome_type': match.outcome_type
             }
             fixtures.append(fixture)
 
