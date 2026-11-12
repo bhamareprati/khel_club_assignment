@@ -96,6 +96,11 @@ class Match(db.Model):
     successor = db.Column(db.Integer, db.ForeignKey('match.id'), nullable=True)
     bracket_position = db.Column(db.Integer, nullable=True)
     round_number = db.Column(db.Integer, nullable=True)
+    # HOW the result was decided (see services/match_outcomes.py): 'regular',
+    # 'walkover', ... NULL = not decided yet, or a historical match whose
+    # outcome could not be established reliably. `status` stays the lifecycle
+    # (pending / on-going / completed); this column never replaces it.
+    outcome_type = db.Column(db.String(20), nullable=True)
 
 class Score(db.Model):
     id = db.Column(db.Integer, primary_key=True)

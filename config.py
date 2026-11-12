@@ -10,5 +10,7 @@ class Config:
     DB_NAME = environ.get('DB_NAME')
     DB_PORT = environ.get('DB_PORT', '3306')
     
-    SQLALCHEMY_DATABASE_URI = f'mysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
+    # DATABASE_URL (optional) overrides the MySQL URI. Used for isolated local
+    # development / automated tests (e.g. sqlite:///dev.db). Unset = unchanged.
+    SQLALCHEMY_DATABASE_URI = environ.get('DATABASE_URL') or f'mysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
