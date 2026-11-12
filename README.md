@@ -158,12 +158,18 @@ python migrations/bul/add_match_outcome_type.py --rollback --confirm
 
 Redeploy the previous backend build with/before a rollback, because the new code reads the column.
 
-**Execution status (honest):** there is no MySQL server on the machine I developed on. The migration script and
-SQL were executed and verified on **SQLite**: against the provided dump's data (loaded with
-`scripts/load_dump_sqlite.py`: column added, 6 matches stay `NULL`) and in 5 automated tests (add, idempotency,
-backfill rules, never-overwrite, rollback). The statements are plain `ALTER TABLE ... ADD COLUMN` and a correlated-subquery
-`UPDATE` valid on MySQL 8, but **they have not been run against a MySQL server**; please run Option A/B on a copy of
-the database first.
+**Execution status.** Verified on a real **MySQL 8.0.40 Community Server** (InnoDB, default strict `sql_mode`; the
+official Windows zip, run locally on 127.0.0.1) and on SQLite:
+
+* The provided dump was loaded into two scratch databases. **Option A** (`python migrations/bul/add_match_outcome_type.py`,
+  `DB_*` environment variables) added `outcome_type varchar(20) NULL`, left all 6 existing matches `NULL`, and a second run was a
+  no-op. **Option B** (`mysql < migrations/bul/add_match_outcome_type.sql`) gave the same column and result.
+* `tests/test_mysql_integration.py` (opt-in, section 10) runs the backfill rules, idempotency, the confirm-gated rollback and
+  the plain `.sql` file against a legacy-shaped InnoDB schema: same outcomes as on SQLite.
+* On SQLite the same script was also exercised against the dump's data and in 5 automated tests.
+
+Still worth doing before production: run it on a **copy of the production database** (different server version, data volume,
+other schema drift than the dump).
 
 ## 8. API
 
@@ -248,7 +254,16 @@ python migrations/bul/add_match_outcome_type.py
 python app.py                               # http://localhost:5001
 ```
 
-**Without MySQL (what I actually used to run and test locally):**
+* `.env` values are interpolated into the URI as-is, so **set `DB_PASSWORD` even if it is empty** (an unset variable becomes the
+  literal password `None`; this is how `config.py` already behaved). Note PowerShell cannot hold an empty variable: use `.env`.
+* The dump contains `SET @@GLOBAL.GTID_PURGED=...`, which a server without GTIDs rejects; delete that line (and the two
+  `SQL_LOG_BIN` lines) from a copy before loading it into a local MySQL.
+* **Pre-existing, unrelated to this change:** `POST /knockout` stores the literal team id `'TBD'` in unfilled slots, and
+  `match.team1_id/team2_id` are foreign keys to `team`, so on MySQL a team row `TBD` must exist or the insert fails with
+  error 1452 (SQLite does not enforce foreign keys, so the demo below does not need it). I verified this on the dump.
+  Inserting a placeholder team row (`INSERT INTO team (team_id,name,tournament_id) VALUES ('TBD','TBD',1)`) fixes it, and that is what I did for the MySQL run.
+
+**Without MySQL (what I used for the browser demo):**
 
 ```powershell
 # use an ABSOLUTE path in DATABASE_URL (Flask-SQLAlchemy resolves relative SQLite paths against ./instance)
@@ -307,10 +322,42 @@ Backend on the provided dump loaded into SQLite (`dev.db`, migration applied), f
 * Regular scoring on another match (11-7, Final) still works: `outcome_type='regular'`, winner, `completed`, and the screen returns to the match list as before.
 * Live overlay: with the overlay open on a pending match, declaring a walkover from the API updated it from `0 0` to `- W` + `WALKOVER` without a reload.
 
+### Real MySQL 8.0.40 (InnoDB)
+
+The default suite is SQLite-only. `tests/test_mysql_integration.py` runs against a real MySQL server and is skipped unless
+`MYSQL_TEST_URL` is set; it creates and drops its own scratch schemas, so give it a user that may `CREATE DATABASE`:
+
+```bash
+MYSQL_TEST_URL=mysql://root@127.0.0.1:3307/khel_test python -m pytest -q tests/test_mysql_integration.py
+```
+
+Run on 2026-11-12 against MySQL Community Server 8.0.40 (`mysql-8.0.40-winx64.zip` from MySQL's official CDN, MD5 checked against the
+published value) with `mysqlclient` 2.3.1: **7 passed** (three consecutive runs, all green):
+
+| Test | What it proves on InnoDB |
+|---|---|
+| `test_walkover_roundtrip_on_mysql` | outcome fields + successor slot persisted |
+| `test_identical_concurrent_walkovers_record_once` | 8 threads (8 sessions) send the same request at the same instant: exactly 1 writes, 7 are replays, no duplicate rows |
+| `test_conflicting_concurrent_walkovers_only_one_wins` | 8 threads with two different winners: exactly one result is stored; the losers get `409 already_completed`; the bracket follows the stored winner |
+| `test_both_semis_advancing_at_once_fill_the_final_with_exactly_two_score_rows` | the two predecessors write the same successor row simultaneously; the successor lock serializes them (the final ends with both teams **and** exactly 2 score rows) |
+| `test_failure_rolls_back_on_mysql` | a crash after a half-applied advance leaves nothing behind |
+| `test_migration_on_mysql_matches_the_sqlite_semantics`, `test_plain_sql_file_runs_on_mysql` | the migration, rollback and SQL file on InnoDB |
+
+Sanity check: with `.with_for_update()` removed from the service, the three concurrency tests **fail** (two runs); with it they pass.
+
+The whole app was also run on that server (`python app.py` with `DB_*` pointing at the migrated dump) and exercised over HTTP:
+knockout creation, walkover + replay (`200`), different winner (`409`), invalid winner (`400`), score edit on a walkover (`409`),
+standings (winner played 1 / won 1 / 2 pts, loser played 1 / lost 1, point difference 0), fixtures (`"Walkover"` / `"0-0"`),
+fixtures CSV, DUPR export (only the played match), bracket advancement (final holds both winners with exactly 2 score rows),
+a regular `11-7` final (`outcome_type='regular'`), and 10 simultaneous identical HTTP requests (1 "recorded", 9 "already recorded",
+2 score rows). Caveat: the dev server is a single gevent process with a blocking C driver, so those HTTP requests may not have
+truly overlapped; the thread-based tests above are the real concurrency proof.
+
 ### Not verified
 
-* The migration and the `FOR UPDATE` row lock on a real **MySQL/InnoDB** server (SQLite ignores `FOR UPDATE`; the concurrency behaviour is by design, not demonstrated).
-* A screen-recording video file is **not** part of this repository (see the submission notes).
+* A **screen-recording video file** is not part of this repository (see section 14).
+* The browser UI was exercised against the SQLite copy, not against MySQL (the API behaviour is identical, shown above).
+* A production MySQL server of another version or with different data (see the end of section 7).
 
 ## 11. Assumptions
 
@@ -331,13 +378,13 @@ These are product decisions the assignment did not specify; each is isolated in 
 * **Authorization + audit log** for result changes (who declared a walkover, when, and why), then an authorized **correction** flow (reverse a walkover, un-advance the bracket safely).
 * **Forfeit** (mid-match, partial scores kept, reason) and **Bye** (single team, auto-advance) as registry entries + validators; store `reason`/`declared_by`.
 * Remove the remaining duplicated result logic: the five standings implementations should become one function fed by `decided_result`/score rows (I only made them walkover-aware and did not rewrite them).
-* A real migration tool (Alembic) instead of loose scripts, and CI running the tests plus a MySQL service container to validate the migration on the real engine.
+* A real migration tool (Alembic) instead of loose scripts, and CI that runs the suite plus `tests/test_mysql_integration.py` against a MySQL service container on every push.
 * Frontend automated tests (the repo has no test setup) and a lint configuration (there is none, so `next lint` cannot run).
 * Rooms in the Socket.IO layer so a client only receives events for its tournament/match.
 
 ## 13. Known limitations
 
-* The migration was **not executed on MySQL** (section 7); everything else was verified on SQLite.
+* Verified on MySQL 8.0.40 and SQLite, **not** on your production server (section 7). No video recording is included.
 * A regular match can still be re-scored after completion (pre-existing behaviour kept on purpose); overriding a knockout match with a *different* winner after the successor was already filled replaces the slot but leaves the old team's zero score row (pre-existing; it was previously also duplicated).
 * `update_successor_match`'s old behaviour of writing `'TBD'`-slot score rows is gone, but stale `'TBD'` rows that may exist in older data are not cleaned up.
 * No authentication, so no `403`.
