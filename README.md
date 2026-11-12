@@ -355,7 +355,7 @@ truly overlapped; the thread-based tests above are the real concurrency proof.
 
 ### Not verified
 
-* A **screen-recording video file** is not part of this repository (see section 14).
+* A **screen-recording video file** is not part of this repository; it is submitted separately.
 * The browser UI was exercised against the SQLite copy, not against MySQL (the API behaviour is identical, shown above).
 * A production MySQL server of another version or with different data (see the end of section 7).
 
