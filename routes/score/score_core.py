@@ -4,43 +4,14 @@ from models import Score, Match, db, Player, Team
 from . import score_bp
 from socket_instance import socketio
 from flask_cors import cross_origin
+from services.match_outcomes import (
+    MatchOutcomeError, ensure_scores_editable, finalize_regular_match, publish_result_update,
+)
 
-def update_successor_match(successor_match_id, current_match_id, winning_team_id):
-    """Updates the successor match with the winning team"""
-    try:
-        successor_match = Match.query.get(successor_match_id)
-        if not successor_match:
-            return
-        
-        # Determine which predecessor this match is and update corresponding team
-        if successor_match.predecessor_1 == current_match_id:
-            successor_match.team1_id = winning_team_id
-        elif successor_match.predecessor_2 == current_match_id:
-            successor_match.team2_id = winning_team_id
-            
-        # If both teams are set, create score entries
-        if successor_match.team1_id and successor_match.team2_id:
-            scores = [
-                Score(
-                    match_id=str(successor_match.id),
-                    team_id=successor_match.team1_id,
-                    score=0,
-                    tournament_id=successor_match.tournament_id
-                ),
-                Score(
-                    match_id=str(successor_match.id),
-                    team_id=successor_match.team2_id,
-                    score=0,
-                    tournament_id=successor_match.tournament_id
-                )
-            ]
-            db.session.bulk_save_objects(scores)
-            
-        db.session.commit()
-        
-    except Exception as e:
-        db.session.rollback()
-        raise e 
+# NOTE: update_successor_match() used to live here. It committed internally and
+# re-created successor Score rows on every call. Knockout progression now lives
+# in services.match_outcomes.advance_winner(): no internal commit (the caller
+# owns the transaction) and no duplicate Score rows.
 
 @score_bp.route('/update-score', methods=['POST'])
 def update_score():
@@ -73,6 +44,9 @@ def update_score():
             return jsonify({'error': 'Match not found'}), 404
 
         print(f"Found match with team1_id={match.team1_id}, team2_id={match.team2_id}")
+
+        # A match decided without scores (e.g. walkover) cannot be scored
+        ensure_scores_editable(match)
 
         # First, check if scores exist, if not create them
         team1_score_record = Score.query.filter_by(
@@ -110,22 +84,13 @@ def update_score():
         else:
             team2_score_record.score = team2_score
 
-        # Update match final status and winner if final is True
+        # Finalize (winner, outcome 'regular', status 'completed', knockout
+        # progression) through the shared outcome service. Nothing commits until below.
         if final:
-            match.is_final = True
-            # Determine winner
-            if team1_score > team2_score:
-                match.winner_team_id = match.team1_id
-            elif team2_score > team1_score:
-                match.winner_team_id = match.team2_id
-            else:
-                match.winner_team_id = None  # Draw
+            finalize_regular_match(match, team1_score, team2_score)
             print(f"Match finalized with winner_team_id: {match.winner_team_id}")
 
-            if match.successor:
-                update_successor_match(match.successor, match.id, match.winner_team_id)
-        
-        # Commit all changes
+        # Commit all changes (single commit: scores + result + successor progression)
         db.session.commit()
         print("Updates committed to database")
 
@@ -137,14 +102,22 @@ def update_score():
             'team2_id': match.team2_id,
             'team2_score': team2_score,
             'is_final': match.is_final,
-            'tournament_id': tournament_id
+            'tournament_id': tournament_id,
+            # additive fields (existing keys unchanged)
+            'status': match.status,
+            'outcome_type': match.outcome_type,
+            'winner_team_id': match.winner_team_id
         }
 
-        # Emit WebSocket event with the updated scores
-        socketio.emit('score_update', response, namespace='/scores')
-        
+        # Emit WebSocket event with the updated scores (after the commit)
+        publish_result_update(response)
+
         print(f"\nSending response: {response}")
         return jsonify(response), 200
+
+    except MatchOutcomeError as e:
+        db.session.rollback()
+        return jsonify({'error': e.message, 'code': e.code}), e.status_code
 
     except Exception as e:
         print(f"\n=== Error occurred ===")
@@ -274,9 +247,10 @@ def get_match_score():
             },
             'status': match.status,
             'is_final': match.is_final,
-            'winner_team_id': match.winner_team_id
+            'winner_team_id': match.winner_team_id,
+            'outcome_type': match.outcome_type
         }
-        
+
         return jsonify(response), 200
         
     except Exception as e:

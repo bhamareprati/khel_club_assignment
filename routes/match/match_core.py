@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from models import Match, Team, Player, Tournament, Score, db, SuperTournament
 from sqlalchemy import or_
+from services.match_outcomes import MatchOutcomeError, ensure_status_change_allowed
 from . import match_bp
 
 @match_bp.route('/create-match', methods=['POST'])
@@ -270,6 +271,9 @@ def update_match_status(match_id):
         if not match:
             return jsonify({'error': 'Match not found'}), 404
 
+        # A match decided without scores (walkover...) stays completed
+        ensure_status_change_allowed(match, new_status)
+
         # Update match status
         match.status = new_status
 
@@ -286,12 +290,17 @@ def update_match_status(match_id):
                 'match_name': match.match_name,
                 'status': match.status,
                 'is_final': match.is_final,
+                'outcome_type': match.outcome_type,
                 'court_number': match.court_number,
                 'pool': match.pool,
                 'team1_id': match.team1_id,
                 'team2_id': match.team2_id
             }
         }), 200
+
+    except MatchOutcomeError as e:
+        db.session.rollback()
+        return jsonify({'error': e.message, 'code': e.code}), e.status_code
 
     except Exception as e:
         db.session.rollback()
